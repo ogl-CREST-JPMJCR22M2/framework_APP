@@ -178,44 +178,42 @@ def valification(peer, peers, root_partid):
             if row[0] == True : return True # 出力がない = 検証成功
 
             ## 特定処理続行
-
-            cur.execute("""
-                CREATE TEMP TABLE potential_kaizan(
-                    child_partid CHARACTER varying(288),
-                    partid CHARACTER varying(288),
-                    duplication boolean,
-                    hash bytea,
-                    hash_c bytea,
-                    hash_on bytea,
-                    UNIQUE (partid, child_partid)
-                );
-
-                CREATE INDEX IF NOT EXISTS i_potkz_partid_child ON potential_kaizan(partid, child_partid);
-
-                INSERT INTO potential_kaizan (partid, child_partid, duplication, hash, hash_c, hash_on)
-                    SELECT DISTINCT
-                        h.parents_partid,
-                        h.partid, 
-                        h.duplication,
-                        hp.hash AS hash,
-                        h.hash AS hash_c,
-                         decode(hpt.hash, 'hex') AS hash_on
-                    FROM hashvals h
-                    JOIN hash_parts_tree hpt ON h.partid = hpt.partid
-                    LEFT JOIN hashvals hp ON h.parents_partid = hp.partid
-                    WHERE hpt.hash <> encode(h.hash, 'hex');
-
-                SELECT child_partid FROM potential_kaizan WHERE child_partid NOT IN (SELECT partid FROM potential_kaizan);
-            """)
-            target = cur.fetchall()
-
-            kaizan_kamo = set()
-
-            cur.execute("SELECT 1 FROM potential_kaizan WHERE duplication = True;")
+            cur.execute("SELECT 1 FROM hashvals WHERE duplication = True;")
             duplication = cur.fetchall()
 
             if len(duplication) >0 :
-            
+
+                cur.execute("""
+                    CREATE TEMP TABLE potential_kaizan(
+                        child_partid CHARACTER varying(288),
+                        partid CHARACTER varying(288),
+                        duplication boolean,
+                        hash bytea,
+                        hash_c bytea,
+                        hash_on bytea,
+                        UNIQUE (partid, child_partid)
+                    );
+
+                    CREATE INDEX IF NOT EXISTS i_potkz_partid_child ON potential_kaizan(partid, child_partid);
+
+                    INSERT INTO potential_kaizan (partid, child_partid, duplication, hash, hash_c, hash_on)
+                        SELECT DISTINCT
+                            h.parents_partid,
+                            h.partid, 
+                            h.duplication,
+                            hp.hash AS hash,
+                            h.hash AS hash_c,
+                            decode(hpt.hash, 'hex') AS hash_on
+                        FROM hashvals h
+                        JOIN hash_parts_tree hpt ON h.partid = hpt.partid
+                        LEFT JOIN hashvals hp ON h.parents_partid = hp.partid
+                        WHERE hpt.hash <> encode(h.hash, 'hex');
+
+                    SELECT child_partid FROM potential_kaizan WHERE child_partid NOT IN (SELECT partid FROM potential_kaizan);
+                """)
+                target = cur.fetchall()
+                kaizan_kamo = set()
+                
                 while True:
                     ## 検証失敗のため特定処理へ
                     # 初期値点ごとで繰り返し
@@ -296,37 +294,64 @@ def valification(peer, peers, root_partid):
                     target = cur.fetchall()  
 
                     if len(target) == 0 : break # 出力がない = 検証終了
+                    
 
             else:
+
+                cur.execute("""
+                    CREATE TEMP TABLE potential_kaizan(
+                        partid CHARACTER varying(288),
+                        parents_partid CHARACTER varying(288),
+                        hash bytea,
+                        hash_on bytea,
+                        UNIQUE (partid, parents_partid)
+                    );
+
+                    CREATE INDEX IF NOT EXISTS i_potkz_partid ON potential_kaizan(partid, parents_partid);
+
+                    INSERT INTO potential_kaizan (partid, parents_partid, hash, hash_on)
+                        SELECT DISTINCT
+                            h.partid, 
+                            h.parents_partid,
+                            h.hash AS hash,
+                            decode(hpt.hash, 'hex') AS hash_on
+                        FROM hashvals h
+                        JOIN hash_parts_tree hpt ON h.partid = hpt.partid
+                        WHERE hpt.hash <> encode(h.hash, 'hex');
+
+                    SELECT partid FROM potential_kaizan WHERE partid NOT IN (SELECT parents_partid FROM potential_kaizan);
+                """)
+                target = cur.fetchall()
+                kaizan_kakutei = set()
 
                 while True:
                     ## 検証失敗のため特定処理へ
                     # 初期値点ごとで繰り返し
-                    for n in target:
 
+                    for n in target:
+                        
                         now_searching = n[0]
-                        kaizan_kamo.add(now_searching)
+                        kaizan_kakutei.add(now_searching)
 
                         cur.execute(f"""
                             WITH target_hash AS (
                                 SELECT 
-                                xor_sha256(ARRAY[ hash_c, hash_on])AS xor_hash 
+                                xor_sha256(ARRAY[hash, hash_on])AS xor_hash 
                                 FROM potential_kaizan p
-                                WHERE p.child_partid = '{now_searching}'
+                                WHERE p.partid = '{now_searching}'
                             ),
                             do_xor AS (
-                                WITH RECURSIVE do_xor(partid, child_partid) AS (
-                                    SELECT partid, child_partid, 
-                                        xor_sha256(ARRAY[hash, xor_hash]) AS done_xor_hash
+                                WITH RECURSIVE do_xor(partid, parents_partid) AS (
+                                    SELECT partid, parents_partid, hash_on AS done_xor_hash
                                     FROM potential_kaizan, target_hash
-                                    WHERE child_partid = '{now_searching}'
+                                    WHERE partid = '{now_searching}'
 
                                     UNION
 
-                                    SELECT p.partid, p.child_partid, 
+                                    SELECT p.partid, p.parents_partid, 
                                         xor_sha256(ARRAY[hash, xor_hash]) AS done_xor_hash
                                     FROM potential_kaizan p, target_hash, do_xor
-                                    WHERE p.child_partid = do_xor.partid
+                                    WHERE p.partid = do_xor.parents_partid
                                 )
                                 SELECT partid, done_xor_hash
                                 FROM do_xor
@@ -339,13 +364,13 @@ def valification(peer, peers, root_partid):
                     # 検証
                     cur.execute("""
                         WITH false_list AS (
-                            SELECT partid, child_partid
+                            SELECT partid, parents_partid
                             FROM potential_kaizan
                             WHERE hash_on <> hash
                         )
                         SELECT partid 
                         FROM false_list 
-                        WHERE partid IN (SELECT child_partid FROM false_list);
+                        WHERE parents_partid IN (SELECT partid FROM false_list);
                     """)
                     target = cur.fetchall()  
 
@@ -355,7 +380,7 @@ def valification(peer, peers, root_partid):
         if conn:
             conn.close()
     
-    return kaizan_kamo
+    return kaizan_kakutei
 
 # ======== MAIN ======== #
 

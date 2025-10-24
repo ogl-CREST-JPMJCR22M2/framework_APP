@@ -8,6 +8,7 @@ from concurrent.futures import ThreadPoolExecutor
 from sqlalchemy import create_engine
 from psycopg2 import connect, sql
 from psycopg2.extras import execute_values
+import sys
 
 import SQLexecutor as SQLexe
 import write_to_db as w
@@ -17,29 +18,28 @@ import calculation as c
 # Set seed for reproducibility
 np.random.seed(42)
 
-num_total_parts = 30
+num_total_parts = int(sys.argv[1])
 num_transactions = 1000
-#kaizan_percent = [1.0, 5.0, 10.0, 15.0] # %で
-kaizan_percent = [1.0, 3.0, 5.0, 10.0]
-percent = kaizan_percent[3]
+kaizan_percent = [1.0, 5.0, 10.0, 15.0] # %で
+percent = kaizan_percent[int(sys.argv[2])]
 
 #init calculation
 root_partid = 'P0'
 peers = ["postgresA", "postgresB", "postgresC"]
 assembler = w.get_Assebler(root_partid)
 
+"""
 start = time.time()
 c.make_merkltree(assembler, root_partid)
 t = time.time() - start
 
 print("Calculation time:", t)
 
-#"""
 start = time.time()
 result = v.valification(assembler, peers, root_partid)
 t = time.time() - start
 print("Varification time (Successflly):", t)
-#"""
+"""
 
 # kaizan part select 
 parts = [f"P{i}" for i in range(num_total_parts)]
@@ -98,6 +98,9 @@ def kaizan(peer, lists):
 kaizan("postgresB", Blist)
 kaizan("postgresC", Clist)
 
+print(df)
+
+"""
 start = time.time()
 result = v.valification(assembler, peers, root_partid)
 t = time.time() - start
@@ -106,4 +109,4 @@ print("Varification time:", t)
 #print(result)
 #print(per)
 print("Specific rate:", len(result)/len(per)*100)
-
+"""
