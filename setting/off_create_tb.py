@@ -31,10 +31,6 @@ for arg in args:
                 """
                 
                 drop table cfpval;
-                
-                CREATE TABLE IF NOT EXISTS partinfo(
-                        PartID CHARACTER varying(288) PRIMARY KEY
-                );
 
                 CREATE TABLE IF NOT EXISTS CFPval(
                         PartID CHARACTER varying(288) PRIMARY KEY,
