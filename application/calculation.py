@@ -4,16 +4,64 @@ import time
 import hashlib
 from decimal import *
 from typing import Optional
-from psycopg2 import connect, sql
-from psycopg2.extras import execute_values
-from psycopg2._psycopg import connection, cursor
+import psycopg
+from psycopg import sql
 from collections import defaultdict
+import mariadb
 
 import SQLexecutor as SQLexe
 import write_to_db as w
 
+#==========#
+# 必要設定  #
+#==========#
 
-def hash_part_tree(peer, peers, root_partid):
+assemblers = ["postgresA", "postgresB", "postgresC"]
+ubuntus = ['ubuntuA', 'ubuntuB', 'ubuntuC']
+
+#==========================================#
+# MariaDBからco2値を取得するためのfunction群   #
+#==========================================#
+
+# offchain-db(mariadb)からcfp値を取得
+def get_co2_mariadb(ubuntus: list[str]): # 引数は
+
+    for host in ubuntus:
+
+        try:
+
+            mconn = mariadb.connect(
+                user='python_user',     # MariaDBのユーザーID
+                password='password',    # MariaDBのrootユーザーのパスワード
+                host=host,              # Ubuntuコンテナ名
+                port=3306,              # MariaDBのポート番号
+                database='offchaindb'   # デフォルトで使用するDB
+            )
+
+            mcur = mconn.cursor(buffered=False)  # ストリーミングモード
+
+            mcur.execute("SELECT partid, co2 FROM cfpval;")
+
+            for row in mcur:
+                yield row
+
+        except mariadb.Error as e:
+            print(f"error:{e}")
+        finally:
+            mcur.close()
+
+# copyコマンドでpostgresにロード
+def load_into_postgres(pgcur):
+    with pgcur.copy("COPY co2vals (partid, co2) FROM STDIN BINARY") as copy:
+        for row in get_co2_mariadb(ubuntus):
+            copy.write_row(row)
+
+
+#====================#
+# ハッシュ部品木の生成  #
+#====================#
+
+def make_hash_parts_tree(assembler, assemblers, root_partid):
 
     conn: Optional[connection] = None
     try:
@@ -22,9 +70,9 @@ def hash_part_tree(peer, peers, root_partid):
             "user": "postgres",
             "password": "mysecretpassword",
             "port": "5432",
-            "host": peer
+            "host": assembler
         }
-        conn = connect(**dsn)
+        conn = psycopg.connect(**dsn)
         conn.autocommit = True
 
         with conn.cursor() as cur:
@@ -36,6 +84,12 @@ def hash_part_tree(peer, peers, root_partid):
                     parents_partid CHARACTER varying(288),
                     qty NUMERIC(100,0),
                     UNIQUE (partid, parents_partid)
+                );
+
+                CREATE TEMP TABLE co2vals (
+                    partid CHARACTER varying(288),
+                    co2 DECIMAL,
+                    PRIMARY KEY (partid)
                 );
                 
                 CREATE TEMP TABLE calc_cfp (
@@ -55,6 +109,7 @@ def hash_part_tree(peer, peers, root_partid):
                 );
 
                 CREATE INDEX idx_tree ON target_tree(partid);
+                CREATE INDEX idx_co2 ON co2vals(partid);
                 CREATE INDEX idx_cfp ON calc_cfp(partid);
                 CREATE INDEX idx_hash ON hashvals(partid);
             """)
@@ -79,19 +134,13 @@ def hash_part_tree(peer, peers, root_partid):
                 """
             cur.execute(sql_1, (root_partid, ))
 
-            ## cfpの算出
-            # offchain-dbからcfpの算出
-            co2_import = " UNION ALL \n".join(["SELECT * FROM dblink('host="+ p +" port=5432 dbname=offchaindb user=postgres password=mysecretpassword', 'SELECT partid, co2 FROM cfpval') AS t1(partid CHARACTER varying(288), co2 DECIMAL)" 
-            for p in peers ]) 
-        
+            # mariadbからデータを収集
+            load_into_postgres(cur)
 
-            sql_2 = f"""
+            sql_2 = """
                 -- cfp算出
                 INSERT INTO calc_cfp (partid, cfp, hash_cfp) 
-                WITH co2vals AS (
-                    {co2_import}
-                ),
-                cfpvals AS(               
+                WITH cfpvals AS(               
                     WITH RECURSIVE calc_qty(partid, root, quantity) AS (
                         SELECT DISTINCT
                             tt.partid,
@@ -119,6 +168,7 @@ def hash_part_tree(peer, peers, root_partid):
                 SELECT partid, cfp, digest(cfp::text, 'sha256') AS hash_cfp
                 FROM cfpvals;
 
+                drop table co2vals;
             """
             cur.execute(sql_2)
 
@@ -202,13 +252,15 @@ def hash_part_tree(peer, peers, root_partid):
     return data
 
 
-def make_merkltree(assembler, root_partid):
+#====================#
+# ハッシュ部品木の生成  #
+#====================#
 
-    peers = ["postgresA", "postgresB", "postgresC"]
+def tree_generation_process(assembler, root_partid):
 
     start = time.time()
     ## postgres処理
-    result = hash_part_tree(assembler, peers, root_partid)
+    result = make_hash_parts_tree(assembler, assemblers, root_partid)
 
     #print("ツリー構築",time.time()-start)
     start = time.time()
@@ -223,49 +275,37 @@ def make_merkltree(assembler, root_partid):
     for partid, assembler, cfp, hashval in result:
         part_list.append(partid)
         hash_list.append(hashval)
-        insert_val_dict[assembler].append((partid, cfp))
+        insert_val_dict[assembler].append((cfp, partid))
 
     # assemblerの辞書のkey
     assembler_unique = list(insert_val_dict.keys())
 
-    #print("データの抽出",time.time()-start)
-    start = time.time()
-
     # Irohaコマンドで書き込み
-    SQLexe.IROHA_CMDexe(assembler, part_list, hash_list)
+    #SQLexe.IROHA_CMDexe(assembler, part_list, hash_list)
 
-    #print("iroha実行",time.time()-start)
-    start = time.time()
-
-    # offchain-dbへの書き込み
+    # offchain-db (mariadb) への書き込み
     for key in assembler_unique:
 
-        upsert_sql = """
-            UPDATE cfpval AS t
-            SET
-                partid = v.partid,
-                cfp = v.cfp
-            FROM (VALUES %s)
-            AS v(partid, cfp)
-            WHERE v.partid = t.partid;
+        upsert_sql = f"""
+            UPDATE cfpval set cfp = %s
+            WHERE partid = %s;
         """
 
         # DB接続
-        conn = connect(
-            dbname = "offchaindb", 
-            user = "postgres", 
-            password = "mysecretpassword",
-            host = key,
-            port = 5432
+        conn = mariadb.connect(
+            host="ubuntu" + key[-1],           # PeerのMariaDBホスト
+            user="python_user",
+            password="password",
+            database="offchaindb",
+            port=3306
         )
 
-        with conn.cursor() as cur:
-            execute_values(cur, upsert_sql, insert_val_dict[key])
+        cur = conn.cursor()
+        cur.executemany(upsert_sql, insert_val_dict[key])
 
         conn.commit()
         conn.close()
-
-    #print("offchainへwrite",time.time()-start)
+        cur.close()
 
 
 # ======== MAIN ======== #
@@ -277,10 +317,10 @@ if __name__ == '__main__':
 
     start = time.time()
 
-    peers = ["postgresA", "postgresB", "postgresC"]
-    #result = hash_part_tree(assembler, peers, root_partid)
+    #result = make_hash_parts_tree(assembler, assemblers, root_partid)
     #print(result)
-    make_merkltree(assembler, root_partid)
+
+    tree_generation_process(assembler, root_partid)
     
     t = time.time() - start
     print("time:", t)
