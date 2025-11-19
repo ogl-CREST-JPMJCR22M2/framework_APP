@@ -370,7 +370,7 @@ def valification(peer, peers, root_partid):
                         )
                         SELECT partid 
                         FROM false_list 
-                        WHERE parents_partid IN (SELECT partid FROM false_list);
+                        WHERE partid NOT IN (SELECT parents_partid FROM false_list);
                     """)
                     target = cur.fetchall()  
 
