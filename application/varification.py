@@ -4,15 +4,63 @@ import time
 import hashlib
 from decimal import *
 from typing import Optional
-from psycopg2 import connect, sql
-from psycopg2._psycopg import connection, cursor
-from psycopg2.extras import execute_values
+import psycopg
+from psycopg import sql
+from collections import defaultdict
+import mariadb
 
-import SQLexecutor as SQLexe
-import write_to_db as w
+import commons as com
+
+#==========#
+# 必要設定  #
+#==========#
+
+assemblers = ["postgresA", "postgresB", "postgresC"]
+ubuntus = ['ubuntuA', 'ubuntuB', 'ubuntuC']
+
+#==========================================#
+# MariaDBからcfp値を取得するためのfunction群   #
+#==========================================#
+
+# offchain-db(mariadb)からcfp値を取得
+def get_cfp_mariadb(ubuntus: list[str]): # 引数は
+
+    for host in ubuntus:
+
+        try:
+
+            mconn = mariadb.connect(
+                user='python_user',     # MariaDBのユーザーID
+                password='password',    # MariaDBのrootユーザーのパスワード
+                host=host,              # Ubuntuコンテナ名
+                port=3306,              # MariaDBのポート番号
+                database='offchaindb'   # デフォルトで使用するDB
+            )
+
+            mcur = mconn.cursor(buffered=False)  # ストリーミングモード
+
+            mcur.execute("SELECT partid, cfp FROM cfpval;")
+
+            for row in mcur:
+                yield row
+
+        except mariadb.Error as e:
+            print(f"error:{e}")
+        finally:
+            mcur.close()
+
+# copyコマンドでpostgresにロード
+def load_into_postgres(pgcur):
+    with pgcur.copy("COPY cfpvals (partid, cfp) FROM STDIN BINARY") as copy:
+        for row in get_cfp_mariadb(ubuntus):
+            copy.write_row(row)
 
 
-def valification(peer, peers, root_partid):
+#============#
+# 検証プロセス #
+#============#
+
+def valification(assembler, assemblers, root_partid):
 
     conn: Optional[connection] = None
     try:
@@ -21,9 +69,9 @@ def valification(peer, peers, root_partid):
             "user": "postgres",
             "password": "mysecretpassword",
             "port": "5432",
-            "host": peer
+            "host": assembler
         }
-        conn = connect(**dsn)
+        conn = psycopg.connect(**dsn)
         conn.autocommit = True
 
         with conn.cursor() as cur:
@@ -35,6 +83,12 @@ def valification(peer, peers, root_partid):
                     parents_partid CHARACTER varying(288),
                     qty int,
                     UNIQUE (partid, parents_partid)
+                );
+
+                CREATE TEMP TABLE cfpvals (
+                    partid CHARACTER varying(288),
+                    cfp DECIMAL,
+                    PRIMARY KEY (partid)
                 );
                 
                 CREATE TEMP TABLE calc_cfp (
@@ -79,22 +133,18 @@ def valification(peer, peers, root_partid):
                 """
             cur.execute(sql_1, (root_partid, ))
 
-            ## cfpの算出
-            # offchain-dbからcfpの算出
-            co2_import = " UNION ALL \n".join(["SELECT * FROM dblink('host="+ p +" port=5432 dbname=offchaindb user=postgres password=mysecretpassword', 'SELECT partid, cfp FROM cfpval') AS t1(partid CHARACTER varying(288), cfp DECIMAL)" 
-            for p in peers ]) 
+            # mariadbからデータを収集
+            load_into_postgres(cur)
         
 
             sql_2 = f"""
                 -- cfp算出
                 INSERT INTO calc_cfp (partid, cfp, hash_cfp) 
-                WITH cfpvals AS (
-                    {co2_import}
-                )
                 SELECT DISTINCT cv.partid, cfp, digest(cfp::text, 'sha256') AS hash_cfp
                 FROM cfpvals cv, target_tree tt
                 WHERE cv.partid = tt.partid;
 
+                drop table cfpvals;
             """
             cur.execute(sql_2)
 
@@ -318,7 +368,9 @@ def valification(peer, peers, root_partid):
                         FROM hashvals h
                         JOIN hash_parts_tree hpt ON h.partid = hpt.partid
                         WHERE hpt.hash <> encode(h.hash, 'hex');
+                """)
 
+                cur.execute("""
                     SELECT partid FROM potential_kaizan WHERE partid NOT IN (SELECT parents_partid FROM potential_kaizan);
                 """)
                 target = cur.fetchall()
@@ -332,6 +384,8 @@ def valification(peer, peers, root_partid):
                         
                         now_searching = n[0]
                         kaizan_kakutei.add(now_searching)
+
+                        print(n)
 
                         cur.execute(f"""
                             WITH target_hash AS (
@@ -370,9 +424,11 @@ def valification(peer, peers, root_partid):
                         )
                         SELECT partid 
                         FROM false_list 
-                        WHERE parents_partid IN (SELECT partid FROM false_list);
+                        WHERE partid NOT IN (SELECT parents_partid FROM false_list);
                     """)
                     target = cur.fetchall()  
+
+                    print(target)
 
                     if len(target) == 0 : break # 出力がない = 検証終了
 
@@ -387,13 +443,11 @@ def valification(peer, peers, root_partid):
 if __name__ == '__main__':
 
     root_partid = 'P0'
-    peers = ["postgresA", "postgresB", "postgresC"]
-
-    assembler = w.get_Assebler(root_partid)
+    assembler = com.get_Assebler(root_partid)
 
     start = time.time()
 
-    result = valification(assembler, peers, root_partid)
+    result = valification(assembler, assemblers, root_partid)
 
     if result == True:
         print("varification successfully")

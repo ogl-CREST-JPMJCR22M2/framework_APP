@@ -23,7 +23,7 @@ def createConnection(host):
     
 if __name__ == '__main__':
 
-    palamater = '0/30/1'  # フォルダ名に対応
+    palamater = '0/30/2'  # フォルダ名に対応
 
     conn_B = conn_C = None
     cur_B = cur_C = None

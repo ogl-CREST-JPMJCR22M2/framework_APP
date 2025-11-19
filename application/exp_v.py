@@ -6,12 +6,12 @@ import polars as pl
 import time
 from concurrent.futures import ThreadPoolExecutor
 from sqlalchemy import create_engine
-from psycopg2 import connect, sql
-from psycopg2.extras import execute_values
+from typing import Optional
+import psycopg
+from psycopg import sql
 import sys
 
-import SQLexecutor as SQLexe
-import write_to_db as w
+import commons as com
 import varification as v
 import calculation as c
 
@@ -26,7 +26,7 @@ percent = kaizan_percent[int(sys.argv[2])]
 #init calculation
 root_partid = 'P0'
 peers = ["postgresA", "postgresB", "postgresC"]
-assembler = w.get_Assebler(root_partid)
+assembler = com.get_Assebler(root_partid)
 
 """
 start = time.time()

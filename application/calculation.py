@@ -9,8 +9,7 @@ from psycopg import sql
 from collections import defaultdict
 import mariadb
 
-import SQLexecutor as SQLexe
-import write_to_db as w
+import commons as com
 
 #==========#
 # 必要設定  #
@@ -281,7 +280,7 @@ def tree_generation_process(assembler, root_partid):
     assembler_unique = list(insert_val_dict.keys())
 
     # Irohaコマンドで書き込み
-    #SQLexe.IROHA_CMDexe(assembler, part_list, hash_list)
+    com.IROHA_CMDexe(assembler, part_list, hash_list)
 
     # offchain-db (mariadb) への書き込み
     for key in assembler_unique:
@@ -313,7 +312,7 @@ def tree_generation_process(assembler, root_partid):
 if __name__ == '__main__':
 
     root_partid = 'P0'
-    assembler = w.get_Assebler(root_partid)
+    assembler = com.get_Assebler(root_partid)
 
     start = time.time()
 
