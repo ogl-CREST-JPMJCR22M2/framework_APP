@@ -13,7 +13,7 @@ def createConnection(host):
             port='5432',
             host=host
         )
-    except mariadb.Error as e:
+    except psycopg.Error as e:
         print(f"error:{e}")
         return None
     
@@ -22,7 +22,7 @@ def createConnection(host):
     
 if __name__ == '__main__':
 
-    palamater = '0/30/2'  # フォルダ名に対応
+    palamater = '0/30000/3'  # フォルダ名に対応
 
     hosts = ['postgresA', 'postgresB', 'postgresC']
 

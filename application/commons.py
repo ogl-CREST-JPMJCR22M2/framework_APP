@@ -4,6 +4,8 @@ from sqlalchemy import create_engine
 import polars as pl
 import psycopg
 from psycopg import sql
+from iroha import Iroha, IrohaCrypto, IrohaGrpc
+from iroha import commands_pb2
 
 
 def IROHA_CMDexe(peer, part_list, hash_list, cmd = "SubtractAssetQuantity"): #peer:executing peer
@@ -14,6 +16,9 @@ def IROHA_CMDexe(peer, part_list, hash_list, cmd = "SubtractAssetQuantity"): #pe
         net = IrohaGrpc('192.168.32.3:50051')
     else :
         net = IrohaGrpc('192.168.32.4:50051')
+
+    iroha = Iroha('admin@test')
+    priv_key = 'f101537e319568c765b2cc89698325604991dca57b9716b58016b253506cab70'
 
     part_id = []
     hash_val = []
@@ -64,7 +69,7 @@ def get_Assebler(target_part):
         cur = conn.cursor()
 
         cur.execute(sql)
-        print(cur.fetchall()[0][0])
+        data= cur.fetchall()[0][0]
 
     except psycopg.Error as e:
         print(f"error: {e}")
@@ -72,6 +77,8 @@ def get_Assebler(target_part):
     finally:
         cur.close()
         conn.close()
+
+    return data
 
 ### 深さを取得
 
