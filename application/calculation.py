@@ -7,7 +7,7 @@ from typing import Optional
 import psycopg
 from psycopg import sql
 from collections import defaultdict
-import mariadb
+import mysql.connector
 
 import commons as com
 
@@ -18,43 +18,6 @@ import commons as com
 assemblers = ["postgresA", "postgresB", "postgresC"]
 ubuntus = ['ubuntuA', 'ubuntuB', 'ubuntuC']
 
-#==========================================#
-# MariaDBからco2値を取得するためのfunction群   #
-#==========================================#
-
-# offchain-db(mariadb)からcfp値を取得
-def get_co2_mariadb(ubuntus: list[str]): # 引数は
-
-    for host in ubuntus:
-
-        try:
-
-            mconn = mariadb.connect(
-                user='python_user',     # MariaDBのユーザーID
-                password='password',    # MariaDBのrootユーザーのパスワード
-                host=host,              # Ubuntuコンテナ名
-                port=3306,              # MariaDBのポート番号
-                database='offchaindb'   # デフォルトで使用するDB
-            )
-
-            mcur = mconn.cursor(buffered=False)  # ストリーミングモード
-
-            mcur.execute("SELECT partid, co2 FROM cfpval;")
-
-            for row in mcur:
-                yield row
-
-        except mariadb.Error as e:
-            print(f"error:{e}")
-        finally:
-            mcur.close()
-
-# copyコマンドでpostgresにロード
-def load_into_postgres(pgcur):
-    with pgcur.copy("COPY co2vals (partid, co2) FROM STDIN BINARY") as copy:
-        for row in get_co2_mariadb(ubuntus):
-            copy.write_row(row)
-
 
 #====================#
 # ハッシュ部品木の生成  #
@@ -64,77 +27,85 @@ def make_hash_parts_tree(assembler, assemblers, root_partid):
 
     conn: Optional[connection] = None
     try:
-        dsn = {
-            "dbname": "iroha_default",
-            "user": "postgres",
-            "password": "mysecretpassword",
-            "port": "5432",
-            "host": assembler
-        }
-        conn = psycopg.connect(**dsn)
+        conn = mysql.connector.connect(
+                user='python_user',     # mysqlのユーザーID
+                password='password',    # mysqlのrootユーザーのパスワード
+                host=assembler,              # Ubuntuコンテナ名
+                port=3306,              # mysqlのポート番号
+                database='offchaindb'   # デフォルトで使用するDB
+            )
+
         conn.autocommit = True
 
         with conn.cursor() as cur:
 
             ## 一時テーブルの構築
             cur.execute("""
-                CREATE TEMP TABLE target_tree (
-                    partid CHARACTER varying(288),
-                    parents_partid CHARACTER varying(288),
-                    qty NUMERIC(100,0),
+                CREATE TEMPORARY TABLE target_tree (
+                    partid CHARACTER varying(50),
+                    parents_partid CHARACTER varying(50),
+                    qty NUMERIC(30,0),
                     UNIQUE (partid, parents_partid)
                 );
-
-                CREATE TEMP TABLE co2vals (
-                    partid CHARACTER varying(288),
-                    co2 DECIMAL,
-                    PRIMARY KEY (partid)
-                );
                 
-                CREATE TEMP TABLE calc_cfp (
-                    partid CHARACTER varying(288),
+                CREATE TEMPORARY TABLE calc_cfp (
+                    partid CHARACTER varying(50),
                     cfp DECIMAL, 
-                    hash_cfp bytea,
+                    hash_cfp BINARY(32),
                     PRIMARY KEY (partid)
                 );
 
-                CREATE TEMP TABLE hashvals(
-                    partid CHARACTER varying(288),
-                    parents_partid CHARACTER varying(288),
+                CREATE TEMPORARY TABLE hashvals(
+                    partid CHARACTER varying(50),
+                    parents_partid CHARACTER varying(50),
                     can_hashing boolean,
                     duplication boolean,
-                    hash bytea,
+                    hash BINARY(32),
                     UNIQUE (partid, parents_partid)
                 );
 
                 CREATE INDEX idx_tree ON target_tree(partid);
-                CREATE INDEX idx_co2 ON co2vals(partid);
                 CREATE INDEX idx_cfp ON calc_cfp(partid);
                 CREATE INDEX idx_hash ON hashvals(partid);
             """)
+
+            ## cfpの算出
+            # 他peerからのデータ収集
+            co2_import = " UNION ALL \n".join(["SELECT * FROM dblink('host="+ p +" port=5432 dbname=offchaindb user=postgres password=mysecretpassword', 'SELECT partid, co2 FROM cfpval') AS t1(partid CHARACTER varying(50), co2 DECIMAL)" 
+            for p in peers ]) 
             
             # 部品木の抽出
             sql_1 = f"""
                 INSERT INTO target_tree (partid, parents_partid, qty) 
-                    WITH RECURSIVE get_tree(partid, parents_partid) AS 
-                        ( 
+                    WITH RECURSIVE all_tree AS (
                             SELECT partid, parents_partid, qty
-                            FROM partrelationship
+                            FROM A_parts_tree
+
+                            UNION ALL
+                            
+                            SELECT partid, parents_partid, qty
+                            FROM B_parts_tree
+
+                            UNION ALL
+                            
+                            SELECT partid, parents_partid, qty
+                            FROM C_parts_tree
+                        ),
+                        get_tree AS ( 
+                            SELECT partid, parents_partid, qty
+                            FROM all_tree
                             WHERE partid = %s
 
                             UNION
 
-                            SELECT r.partid, r.parents_partid, r.qty
-                            FROM partrelationship r, get_tree gt
-                            WHERE r.parents_partid = gt.partid 
+                            SELECT a.partid, a.parents_partid, a.qty
+                            FROM all_tree a, get_tree gt
+                            WHERE a.parents_partid = gt.partid 
                         )
                         SELECT gt.partid, gt.parents_partid, qty
                         FROM get_tree gt;
                 """
             cur.execute(sql_1, (root_partid, ))
-
-            # mariadbからデータを収集
-            load_into_postgres(cur)
 
             sql_2 = """
                 -- cfp算出
@@ -238,9 +209,23 @@ def make_hash_parts_tree(assembler, assemblers, root_partid):
                 cur.execute(sql_4)
                 
             cur.execute( """
+                WITH assembler_map AS (
+                    SELECT partid, assembler
+                    FROM A_assembler
+
+                    UNION ALL
+
+                    SELECT partid, assembler
+                    FROM B_assembler
+
+                    UNION ALL
+
+                    SELECT partid, assembler
+                    FROM C_assembler
+                )
                 SELECT DISTINCT calc_cfp.partid, assembler, cfp, encode(hash, 'hex') AS hashval 
-                FROM calc_cfp, hashvals, partinfo pi 
-                WHERE calc_cfp.partid = hashvals.partid AND calc_cfp.partid = pi.partid;
+                    FROM calc_cfp, hashvals, assembler_map ap
+                    WHERE calc_cfp.partid = hashvals.partid AND calc_cfp.partid = ap.partid;
                 """)
             data = cur.fetchall()
 
@@ -255,7 +240,9 @@ def make_hash_parts_tree(assembler, assemblers, root_partid):
 # ハッシュ部品木の生成  #
 #====================#
 
-def tree_generation_process(assembler, root_partid):
+def tree_generation_process(root_partid):
+
+    assembler = com.get_Assebler(root_partid)
 
     start = time.time()
     ## postgres処理
@@ -282,7 +269,7 @@ def tree_generation_process(assembler, root_partid):
     # Irohaコマンドで書き込み
     com.IROHA_CMDexe(assembler, part_list, hash_list)
 
-    # offchain-db (mariadb) への書き込み
+    # offchain-db (mysql) への書き込み
     for key in assembler_unique:
 
         upsert_sql = f"""
@@ -291,8 +278,8 @@ def tree_generation_process(assembler, root_partid):
         """
 
         # DB接続
-        conn = mariadb.connect(
-            host="ubuntu" + key[-1],           # PeerのMariaDBホスト
+        conn = mysql.connector.connect(
+            host="ubuntu" + key[-1],           # Peerのmysqlホスト
             user="python_user",
             password="password",
             database="offchaindb",
@@ -312,7 +299,6 @@ def tree_generation_process(assembler, root_partid):
 if __name__ == '__main__':
 
     root_partid = 'P0'
-    assembler = com.get_Assebler(root_partid)
 
     start = time.time()
 
